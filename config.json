@@ -1,0 +1,11 @@
+{
+    "daily_goal": 2000,
+    "cup_size": 250,
+    "remind_interval": 30,
+    "remind_enabled": true,
+    "sound_enabled": true,
+    "records": [],
+    "last_date": null,
+    "sedentary_interval": 45,
+    "sedentary_enabled": true
+}
