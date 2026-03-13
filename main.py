@@ -3,7 +3,9 @@
 import argparse
 import logging
 import sys
+import time
 from pathlib import Path
+from urllib.parse import urlparse
 
 # Keep import path stable for both source run and bundled run.
 PROJECT_DIR = Path(__file__).resolve().parent
@@ -59,7 +61,76 @@ def parse_args():
         action="store_true",
         help="Force show main window on startup for this launch.",
     )
+    parser.add_argument(
+        "--action-url",
+        type=str,
+        help="Handle deep-link action (internal use).",
+    )
     return parser.parse_args()
+
+
+def ensure_url_protocol(logger: logging.Logger):
+    """Register dailyhydrate:// protocol under HKCU for toast action callbacks."""
+    if sys.platform != "win32":
+        return
+    try:
+        import winreg
+    except Exception:
+        return
+
+    protocol = "dailyhydrate"
+    root = winreg.HKEY_CURRENT_USER
+    base = fr"Software\Classes\{protocol}"
+    command_key = fr"{base}\shell\open\command"
+
+    if getattr(sys, "frozen", False):
+        cmd = f'"{sys.executable}" --action-url "%1"'
+    else:
+        cmd = f'"{sys.executable}" "{Path(__file__).resolve()}" --action-url "%1"'
+
+    try:
+        key = winreg.CreateKey(root, base)
+        winreg.SetValueEx(key, "", 0, winreg.REG_SZ, "URL:DailyHydrate Protocol")
+        winreg.SetValueEx(key, "URL Protocol", 0, winreg.REG_SZ, "")
+        winreg.CloseKey(key)
+
+        key_cmd = winreg.CreateKey(root, command_key)
+        winreg.SetValueEx(key_cmd, "", 0, winreg.REG_SZ, cmd)
+        winreg.CloseKey(key_cmd)
+        logger.info("Registered URL protocol: %s://", protocol)
+    except Exception:
+        logger.exception("Failed to register URL protocol")
+
+
+def handle_action_url(action_url: str, config: ConfigManager, logger: logging.Logger):
+    """Handle deep-link actions and exit."""
+    try:
+        parsed = urlparse(action_url)
+        host = (parsed.netloc or "").lower()
+        path_parts = [p for p in parsed.path.split("/") if p]
+
+        # dailyhydrate://drink/250
+        if host == "drink" and path_parts:
+            amount = int(path_parts[0])
+            if amount > 0:
+                config.add_record(amount)
+                config.set_snooze_until(None)
+                logger.info("Action handled: drink %s ml", amount)
+                return True
+
+        # dailyhydrate://snooze/10
+        if host == "snooze" and path_parts:
+            minutes = int(path_parts[0])
+            if minutes > 0:
+                config.set_snooze_until(time.time() + minutes * 60)
+                logger.info("Action handled: snooze %s min", minutes)
+                return True
+
+        logger.warning("Unsupported action url: %s", action_url)
+        return False
+    except Exception:
+        logger.exception("Failed to handle action url: %s", action_url)
+        return False
 
 
 def check_dependencies(logger: logging.Logger):
@@ -92,6 +163,12 @@ def main():
     logger.info("Using config: %s", config_path)
 
     config_manager = ConfigManager(str(config_path))
+
+    ensure_url_protocol(logger)
+    if args.action_url:
+        handle_action_url(args.action_url, config_manager, logger)
+        return
+
     reminder_manager = ReminderManager(config_manager)
 
     # Startup mode priority: CLI override > config default

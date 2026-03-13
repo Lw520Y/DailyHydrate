@@ -5,7 +5,7 @@ import json
 import os
 import threading
 import tempfile
-from datetime import datetime
+from datetime import datetime, timedelta
 
 
 class ConfigManager:
@@ -24,9 +24,14 @@ class ConfigManager:
             "sound_enabled": True,
             "records": [],
             "last_date": None,
+            "history": {},
             "sedentary_interval": 45,
             "sedentary_enabled": True,
             "start_minimized": False,
+            "quiet_hours_enabled": False,
+            "quiet_start": "23:00",
+            "quiet_end": "07:00",
+            "snooze_until": None,
         }
 
         with self._lock:
@@ -38,11 +43,33 @@ class ConfigManager:
                     # 合并缺失字段，保持向后兼容
                     for key, value in default_config.items():
                         loaded_config.setdefault(key, value)
+                    self._migrate_history(loaded_config)
                     return loaded_config
                 except (json.JSONDecodeError, IOError):
                     return default_config
 
             return default_config
+
+    def _migrate_history(self, cfg):
+        """迁移并清理历史数据，兼容旧版本配置。"""
+        history = cfg.get("history")
+        if not isinstance(history, dict):
+            history = {}
+
+        # 旧版本只有 records/last_date：将当日汇总写入 history。
+        last_date = cfg.get("last_date")
+        if last_date and isinstance(cfg.get("records"), list):
+            total = sum(record.get("amount", 0) for record in cfg.get("records", []))
+            if total > 0 and last_date not in history:
+                history[last_date] = total
+
+        # 仅保留最近 90 天，避免配置无限增长。
+        cleaned = {}
+        for i in range(90):
+            day = (datetime.now() - timedelta(days=i)).strftime("%Y-%m-%d")
+            cleaned[day] = int(history.get(day, 0))
+
+        cfg["history"] = cleaned
 
     def save_config(self):
         """保存配置文件"""
@@ -124,6 +151,8 @@ class ConfigManager:
                 self.config["last_date"] = today
 
             self.config["records"].append({"time": current_time, "amount": amount})
+            self.config.setdefault("history", {})
+            self.config["history"][today] = int(self.config["history"].get(today, 0)) + int(amount)
             self.save_config()
 
     def get_today_total(self):
@@ -141,6 +170,8 @@ class ConfigManager:
             today = datetime.now().strftime("%Y-%m-%d")
             self.config["records"] = []
             self.config["last_date"] = today
+            self.config.setdefault("history", {})
+            self.config["history"][today] = 0
             self.save_config()
 
     # 久坐提醒相关方法
@@ -175,4 +206,51 @@ class ConfigManager:
         """设置启动时最小化开关"""
         with self._lock:
             self.config["start_minimized"] = enabled
+            self.save_config()
+
+    def is_quiet_hours_enabled(self):
+        with self._lock:
+            return self.config.get("quiet_hours_enabled", False)
+
+    def set_quiet_hours_enabled(self, enabled):
+        with self._lock:
+            self.config["quiet_hours_enabled"] = enabled
+            self.save_config()
+
+    def get_quiet_start(self):
+        with self._lock:
+            return self.config.get("quiet_start", "23:00")
+
+    def set_quiet_start(self, time_str):
+        with self._lock:
+            self.config["quiet_start"] = time_str
+            self.save_config()
+
+    def get_quiet_end(self):
+        with self._lock:
+            return self.config.get("quiet_end", "07:00")
+
+    def set_quiet_end(self, time_str):
+        with self._lock:
+            self.config["quiet_end"] = time_str
+            self.save_config()
+
+    def get_recent_history(self, days=7):
+        """返回最近 N 天饮水总量（含今天）。"""
+        with self._lock:
+            history = self.config.get("history", {})
+            result = []
+            for i in range(days - 1, -1, -1):
+                day = (datetime.now() - timedelta(days=i)).strftime("%Y-%m-%d")
+                result.append({"date": day, "total": int(history.get(day, 0))})
+            return result
+
+    def get_snooze_until(self):
+        with self._lock:
+            value = self.config.get("snooze_until")
+            return float(value) if value else None
+
+    def set_snooze_until(self, timestamp):
+        with self._lock:
+            self.config["snooze_until"] = float(timestamp) if timestamp else None
             self.save_config()

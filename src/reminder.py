@@ -5,6 +5,7 @@ import threading
 import time
 import subprocess
 import logging
+from datetime import datetime
 
 
 logger = logging.getLogger(__name__)
@@ -58,6 +59,13 @@ class ReminderManager:
                 interval = self.config.get_remind_interval() * 60
                 if self.config.is_remind_enabled() and interval > 0:
                     current_time = time.time()
+                    snooze_until = self.config.get_snooze_until()
+                    if snooze_until and current_time < snooze_until:
+                        time.sleep(1)
+                        continue
+                    if self._is_quiet_time():
+                        time.sleep(1)
+                        continue
                     if self.last_remind_time is None or (current_time - self.last_remind_time) >= interval:
                         self._send_reminder()
                         self.last_remind_time = current_time
@@ -89,6 +97,8 @@ class ReminderManager:
                 duration="long",
             )
             toast.add_actions(label="Open", link="")
+            toast.add_actions(label="喝250ml", link="dailyhydrate://drink/250")
+            toast.add_actions(label="稍后10分钟", link="dailyhydrate://snooze/10")
             toast.on_click = lambda: self._on_notification_clicked()
 
             if self.config.is_sound_enabled():
@@ -211,11 +221,50 @@ class ReminderManager:
     def reset_timer(self):
         """重置喝水提醒计时器"""
         self.last_remind_time = time.time()
+        self.config.set_snooze_until(None)
+
+    def snooze_reminder(self, minutes):
+        """稍后提醒，单位分钟。"""
+        if minutes <= 0:
+            return
+        self.config.set_snooze_until(time.time() + minutes * 60)
+
+    def _parse_hhmm(self, value):
+        try:
+            hour, minute = value.split(":", 1)
+            hour = int(hour)
+            minute = int(minute)
+            if 0 <= hour <= 23 and 0 <= minute <= 59:
+                return hour, minute
+            return None
+        except Exception:
+            return None
+
+    def _is_quiet_time(self):
+        if not self.config.is_quiet_hours_enabled():
+            return False
+
+        start = self._parse_hhmm(self.config.get_quiet_start())
+        end = self._parse_hhmm(self.config.get_quiet_end())
+        if not start or not end:
+            return False
+
+        now = datetime.now().time()
+        start_t = now.replace(hour=start[0], minute=start[1], second=0, microsecond=0)
+        end_t = now.replace(hour=end[0], minute=end[1], second=0, microsecond=0)
+
+        if start_t <= end_t:
+            return start_t <= now <= end_t
+        return now >= start_t or now <= end_t
 
     def get_remaining_seconds(self):
         """获取下次喝水提醒剩余秒数"""
         if not self.config.is_remind_enabled():
             return None
+
+        snooze_until = self.config.get_snooze_until()
+        if snooze_until and snooze_until > time.time():
+            return int(snooze_until - time.time())
 
         interval = self.config.get_remind_interval() * 60
         if interval <= 0:
@@ -242,6 +291,9 @@ class ReminderManager:
                 interval = self.config.get_sedentary_interval() * 60
                 if self.config.is_sedentary_enabled() and interval > 0:
                     current_time = time.time()
+                    if self._is_quiet_time():
+                        time.sleep(1)
+                        continue
                     if self.last_sedentary_time is None or (current_time - self.last_sedentary_time) >= interval:
                         self._send_sedentary_reminder()
                         self.last_sedentary_time = current_time

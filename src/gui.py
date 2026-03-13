@@ -97,6 +97,7 @@ class DailyHydrateGUI:
                 pystray.MenuItem("显示窗口", self.show_window, default=True),
                 pystray.MenuItem("喝水 250ml", lambda: self._tray_add_water(250)),
                 pystray.MenuItem("喝水 500ml", lambda: self._tray_add_water(500)),
+                pystray.MenuItem("稍后提醒10分钟", lambda: self._tray_snooze_reminder(10)),
                 pystray.Menu.SEPARATOR,
                 pystray.MenuItem("重置久坐计时", self._tray_reset_sedentary),
                 pystray.Menu.SEPARATOR,
@@ -124,6 +125,10 @@ class DailyHydrateGUI:
     def _tray_reset_sedentary(self):
         self.reminder.reset_sedentary_timer()
         self.root.after(0, self.update_sedentary_countdown)
+
+    def _tray_snooze_reminder(self, minutes):
+        self.reminder.snooze_reminder(minutes)
+        self.root.after(0, self._render_countdown_label)
 
     def show_window(self, *args):
         """显示窗口（从托盘或通知点击唤醒）"""
@@ -233,6 +238,16 @@ class DailyHydrateGUI:
         )
         self.sedentary_countdown_label.pack(pady=(5, 0))
 
+        history_frame = ttk.LabelFrame(main_frame, text="最近7天", padding="15")
+        history_frame.pack(fill=tk.X, pady=(0, 15))
+
+        self.week_total_label = ttk.Label(history_frame, text="总饮水: 0 ml")
+        self.week_total_label.pack(anchor="w")
+        self.week_avg_label = ttk.Label(history_frame, text="日均饮水: 0 ml")
+        self.week_avg_label.pack(anchor="w")
+        self.streak_label = ttk.Label(history_frame, text="连续达标: 0 天")
+        self.streak_label.pack(anchor="w")
+
         drink_frame = ttk.LabelFrame(main_frame, text="记录喝水", padding="15")
         drink_frame.pack(fill=tk.X, pady=(0, 15))
 
@@ -326,10 +341,30 @@ class DailyHydrateGUI:
             command=self.toggle_start_minimized,
         ).grid(row=5, column=0, columnspan=4, sticky="w", pady=5)
 
+        self.quiet_var = tk.BooleanVar(value=self.config.is_quiet_hours_enabled())
+        ttk.Checkbutton(
+            settings_frame,
+            text="启用静默时段",
+            variable=self.quiet_var,
+            command=self.toggle_quiet_hours,
+        ).grid(row=6, column=0, columnspan=2, sticky="w", pady=5)
+
+        ttk.Label(settings_frame, text="静默:").grid(row=7, column=0, sticky="e", pady=5)
+        self.quiet_start_entry = ttk.Entry(settings_frame, width=8)
+        self.quiet_start_entry.grid(row=7, column=1, sticky="w", padx=5, pady=5)
+        self.quiet_start_entry.insert(0, self.config.get_quiet_start())
+        self.quiet_end_entry = ttk.Entry(settings_frame, width=8)
+        self.quiet_end_entry.grid(row=7, column=2, sticky="w", padx=5, pady=5)
+        self.quiet_end_entry.insert(0, self.config.get_quiet_end())
+        ttk.Button(settings_frame, text="保存", command=self.save_quiet_hours, width=6).grid(
+            row=7, column=3, sticky="e", pady=5
+        )
+
         bottom_frame = ttk.Frame(main_frame)
         bottom_frame.pack(fill=tk.X, pady=(10, 0))
 
         ttk.Button(bottom_frame, text="清空记录", command=self.clear_records).pack(side=tk.LEFT)
+        ttk.Button(bottom_frame, text="稍后10分钟", command=lambda: self.snooze_reminder(10)).pack(side=tk.RIGHT, padx=5)
         ttk.Button(bottom_frame, text="测试提醒", command=self.test_remind).pack(side=tk.RIGHT)
 
     def add_water(self, amount):
@@ -405,6 +440,34 @@ class DailyHydrateGUI:
     def toggle_start_minimized(self):
         self.config.set_start_minimized(self.start_minimized_var.get())
 
+    def toggle_quiet_hours(self):
+        self.config.set_quiet_hours_enabled(self.quiet_var.get())
+
+    def save_quiet_hours(self):
+        start = self.quiet_start_entry.get().strip()
+        end = self.quiet_end_entry.get().strip()
+        if not self._valid_hhmm(start) or not self._valid_hhmm(end):
+            messagebox.showerror("错误", "时间格式应为 HH:MM，例如 23:00")
+            return
+
+        self.config.set_quiet_start(start)
+        self.config.set_quiet_end(end)
+        messagebox.showinfo("成功", f"静默时段已设置为 {start} - {end}")
+
+    def _valid_hhmm(self, value):
+        try:
+            hour, minute = value.split(":", 1)
+            hour = int(hour)
+            minute = int(minute)
+            return 0 <= hour <= 23 and 0 <= minute <= 59
+        except Exception:
+            return False
+
+    def snooze_reminder(self, minutes):
+        self.reminder.snooze_reminder(minutes)
+        self._render_countdown_label()
+        messagebox.showinfo("已设置", f"喝水提醒已延后 {minutes} 分钟")
+
     def clear_records(self):
         if messagebox.askyesno("确认", "确定清空今日所有记录?"):
             self.config.clear_today_records()
@@ -433,6 +496,27 @@ class DailyHydrateGUI:
             self.percent_label.config(foreground="black")
 
         self._update_tray_tooltip(total, goal)
+        self.update_history_stats()
+
+    def update_history_stats(self):
+        history = self.config.get_recent_history(7)
+        week_total = sum(item["total"] for item in history)
+        week_avg = int(week_total / 7) if history else 0
+        streak = self._calculate_streak(history)
+
+        self.week_total_label.config(text=f"总饮水: {week_total} ml")
+        self.week_avg_label.config(text=f"日均饮水: {week_avg} ml")
+        self.streak_label.config(text=f"连续达标: {streak} 天")
+
+    def _calculate_streak(self, history):
+        goal = self.config.get_daily_goal()
+        streak = 0
+        for item in reversed(history):
+            if item["total"] >= goal:
+                streak += 1
+            else:
+                break
+        return streak
 
     def _update_tray_tooltip(self, total, goal):
         if self.tray_icon:
@@ -478,13 +562,15 @@ class DailyHydrateGUI:
         if self.is_closing:
             return
 
+        self._render_countdown_label()
+        self.countdown_after_id = self.root.after(1000, self.update_countdown)
+
+    def _render_countdown_label(self):
         remaining = self.reminder.get_remaining_time_str()
         if remaining == "--:--":
             self.countdown_label.config(text="提醒已关闭", foreground="gray")
         else:
             self.countdown_label.config(text=f"下次提醒: {remaining}", foreground="blue")
-
-        self.countdown_after_id = self.root.after(1000, self.update_countdown)
 
     def update_sedentary_countdown(self):
         """每秒刷新久坐倒计时（单链路）"""
