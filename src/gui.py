@@ -29,8 +29,9 @@ class DailyHydrateGUI:
         # 创建主窗口
         self.root = tk.Tk()
         self.root.title("每日喝水提醒")
-        self.root.geometry("420x720")
-        self.root.resizable(False, False)
+        self.root.geometry("460x760")
+        self.root.resizable(True, True)
+        self.root.minsize(420, 640)
 
         # 通知回调与 UI 主线程调度
         self.reminder.on_remind_callback = self.on_remind
@@ -50,6 +51,8 @@ class DailyHydrateGUI:
         self.style = ttk.Style()
         self.style.theme_use("clam")
 
+        # 可滚动内容容器，避免内容增多后显示不全
+        self._setup_scrollable_container()
         self.create_widgets()
         self.update_display()
 
@@ -62,6 +65,34 @@ class DailyHydrateGUI:
         self.schedule_update()
         self.update_countdown()
         self.update_sedentary_countdown()
+
+    def _setup_scrollable_container(self):
+        wrapper = ttk.Frame(self.root)
+        wrapper.pack(fill=tk.BOTH, expand=True)
+
+        self.canvas = tk.Canvas(wrapper, highlightthickness=0)
+        self.v_scroll = ttk.Scrollbar(wrapper, orient=tk.VERTICAL, command=self.canvas.yview)
+        self.canvas.configure(yscrollcommand=self.v_scroll.set)
+
+        self.v_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        self.content_frame = ttk.Frame(self.canvas)
+        self.canvas_window = self.canvas.create_window((0, 0), window=self.content_frame, anchor="nw")
+
+        self.content_frame.bind("<Configure>", self._on_content_configure)
+        self.canvas.bind("<Configure>", self._on_canvas_configure)
+        self.root.bind_all("<MouseWheel>", self._on_mousewheel)
+
+    def _on_content_configure(self, _event):
+        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+
+    def _on_canvas_configure(self, event):
+        self.canvas.itemconfigure(self.canvas_window, width=event.width)
+
+    def _on_mousewheel(self, event):
+        if self.root.winfo_exists():
+            self.canvas.yview_scroll(int(-event.delta / 120), "units")
 
     def _get_icon_path(self):
         """获取图标路径"""
@@ -191,7 +222,7 @@ class DailyHydrateGUI:
 
     def create_widgets(self):
         """创建界面组件"""
-        main_frame = ttk.Frame(self.root, padding="20")
+        main_frame = ttk.Frame(self.content_frame, padding="20")
         main_frame.pack(fill=tk.BOTH, expand=True)
 
         title_label = ttk.Label(
