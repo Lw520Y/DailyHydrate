@@ -1,81 +1,114 @@
-"""
-每日喝水提醒 - 主程序入口
-Daily Hydrate - Main Entry Point
+﻿"""Daily Hydrate main entry."""
 
-功能：
-1. 自定义每日喝水量目标
-2. 添加喝水计划（自定义杯容量）
-3. Windows系统弹窗提醒
-
-作者：DailyHydrate
-版本：1.0.0
-"""
-
+import argparse
+import logging
 import sys
-import os
+from pathlib import Path
 
-# 添加src目录到路径
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "src"))
+# Keep import path stable for both source run and bundled run.
+PROJECT_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(PROJECT_DIR / "src"))
 
 from src.config_manager import ConfigManager
 from src.reminder import ReminderManager
 from src.gui import DailyHydrateGUI
 
-def check_dependencies():
-    """检查依赖是否安装"""
-    missing_deps = []
+
+def resolve_runtime_dir() -> Path:
+    """Return writable runtime directory for config/log files."""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return PROJECT_DIR
+
+
+def setup_logging(runtime_dir: Path) -> logging.Logger:
+    """Configure app logging to file and console."""
+    log_file = runtime_dir / "dailyhydrate.log"
+
+    formatter = logging.Formatter(
+        fmt="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO)
+    root_logger.handlers.clear()
+
+    file_handler = logging.FileHandler(log_file, encoding="utf-8")
+    file_handler.setFormatter(formatter)
+    root_logger.addHandler(file_handler)
+
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setFormatter(formatter)
+    root_logger.addHandler(console_handler)
+
+    logger = logging.getLogger("dailyhydrate")
+    logger.info("Log initialized: %s", log_file)
+    return logger
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Daily Hydrate")
+    parser.add_argument(
+        "--minimized",
+        action="store_true",
+        help="Start minimized to tray for this launch.",
+    )
+    parser.add_argument(
+        "--show",
+        action="store_true",
+        help="Force show main window on startup for this launch.",
+    )
+    return parser.parse_args()
+
+
+def check_dependencies(logger: logging.Logger):
+    """Non-blocking dependency check for optional backends."""
+    missing = []
+    try:
+        import winotify  # noqa: F401
+    except ImportError:
+        missing.append("winotify")
 
     try:
-        import winotify
+        import pystray  # noqa: F401
     except ImportError:
-        missing_deps.append("winotify")
+        missing.append("pystray")
 
-    if missing_deps:
-        print("=" * 50)
-        print("缺少必要的依赖库！")
-        print("=" * 50)
-        print("\n请运行以下命令安装依赖：")
-        print("pip install -r requirements.txt")
-        print("\n或者单独安装：")
-        for dep in missing_deps:
-            print(f"pip install {dep}")
-        print("\n提示：如果不安装winotify，程序将使用tkinter弹窗作为备选方案。")
-        print("=" * 50)
-        print()
+    if missing:
+        logger.warning("Optional dependencies missing: %s", ", ".join(missing))
+        logger.warning("Install with: pip install -r requirements.txt")
+
 
 def main():
-    """主函数"""
-    print("=" * 50)
-    print("💧 每日喝水提醒 - Daily Hydrate")
-    print("=" * 50)
-    print()
+    args = parse_args()
+    runtime_dir = resolve_runtime_dir()
+    logger = setup_logging(runtime_dir)
 
-    # 检查依赖（不强制要求）
-    check_dependencies()
+    logger.info("Daily Hydrate starting")
+    check_dependencies(logger)
 
-    # 获取配置文件路径
-    if getattr(sys, 'frozen', False):
-        # 打包后的exe运行环境
-        config_path = os.path.join(os.path.dirname(sys.executable), "config.json")
-    else:
-        # 开发环境
-        config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+    config_path = runtime_dir / "config.json"
+    logger.info("Using config: %s", config_path)
 
-    # 初始化管理器
-    config_manager = ConfigManager(config_path)
+    config_manager = ConfigManager(str(config_path))
     reminder_manager = ReminderManager(config_manager)
 
-    # 启动GUI
+    # Startup mode priority: CLI override > config default
+    start_minimized = config_manager.is_start_minimized()
+    if args.minimized:
+        start_minimized = True
+    if args.show:
+        start_minimized = False
+
     try:
         app = DailyHydrateGUI(config_manager, reminder_manager)
-        app.run()
-    except Exception as e:
-        print(f"程序运行出错: {e}")
-        import traceback
-        traceback.print_exc()
-        # 仅在有控制台时等待用户输入
-        if sys.stdin is not None:
-            input("按回车键退出...")
+        app.run(start_minimized=start_minimized)
+    except Exception:
+        logger.exception("Application crashed")
+        if sys.stdin is not None and not getattr(sys, "frozen", False):
+            input("Press Enter to exit...")
+
 
 if __name__ == "__main__":
     main()

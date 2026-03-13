@@ -1,19 +1,30 @@
-"""
-提醒模块 - 负责发送Windows通知提醒
+﻿"""
+提醒模块 - 负责发送 Windows 通知提醒
 """
 import threading
 import time
 import subprocess
-import os
-from datetime import datetime
+import logging
+
+
+logger = logging.getLogger(__name__)
+
 
 class ReminderManager:
-    def __init__(self, config_manager, on_remind_callback=None, on_notification_click=None,
-                 on_sedentary_callback=None):
+    def __init__(
+        self,
+        config_manager,
+        on_remind_callback=None,
+        on_notification_click=None,
+        on_sedentary_callback=None,
+        ui_dispatch=None,
+    ):
         self.config = config_manager
         self.on_remind_callback = on_remind_callback
         self.on_notification_click = on_notification_click
         self.on_sedentary_callback = on_sedentary_callback
+        self.ui_dispatch = ui_dispatch
+
         self.timer_thread = None
         self.sedentary_thread = None
         self.running = False
@@ -29,7 +40,6 @@ class ReminderManager:
         self.timer_thread = threading.Thread(target=self._remind_loop, daemon=True)
         self.timer_thread.start()
 
-        # 启动久坐提醒线程
         self.sedentary_thread = threading.Thread(target=self._sedentary_loop, daemon=True)
         self.sedentary_thread.start()
 
@@ -42,23 +52,18 @@ class ReminderManager:
             self.sedentary_thread.join(timeout=1)
 
     def _remind_loop(self):
-        """提醒循环"""
+        """喝水提醒循环"""
         while self.running:
             try:
                 interval = self.config.get_remind_interval() * 60
-
                 if self.config.is_remind_enabled() and interval > 0:
                     current_time = time.time()
-
-                    if self.last_remind_time is None or \
-                       (current_time - self.last_remind_time) >= interval:
+                    if self.last_remind_time is None or (current_time - self.last_remind_time) >= interval:
                         self._send_reminder()
                         self.last_remind_time = current_time
-
                 time.sleep(1)
-
             except Exception as e:
-                print(f"Reminder loop error: {e}")
+                logger.exception("Reminder loop error: %s", e)
                 time.sleep(1)
 
     def _send_reminder(self):
@@ -67,13 +72,13 @@ class ReminderManager:
             try:
                 self.on_remind_callback()
             except Exception as e:
-                print(f"Callback error: {e}")
+                logger.exception("Reminder callback error: %s", e)
 
     def send_notification(self, title, message):
-        """发送Windows系统通知"""
+        """发送 Windows 系统通知"""
         success = False
 
-        # 方式1: 使用 winotify (支持点击回调)
+        # 方式1: winotify（支持点击回调）
         try:
             from winotify import Notification, audio
 
@@ -81,10 +86,8 @@ class ReminderManager:
                 app_id="Microsoft.Windows.Shell.RunDialog",
                 title=title,
                 msg=message,
-                duration="long"
+                duration="long",
             )
-
-            # 添加点击回调
             toast.add_actions(label="Open", link="")
             toast.on_click = lambda: self._on_notification_clicked()
 
@@ -95,26 +98,26 @@ class ReminderManager:
 
             toast.show()
             success = True
-            print("winotify notification sent")
+            logger.info("winotify notification sent")
         except Exception as e:
-            print(f"winotify failed: {e}")
+            logger.warning("winotify failed: %s", e)
 
-        # 方式2: 使用 PowerShell Toast 通知
+        # 方式2: PowerShell Toast
         if not success:
             try:
                 self._send_powershell_notification(title, message)
                 success = True
-                print("PowerShell notification sent")
+                logger.info("PowerShell notification sent")
             except Exception as e:
-                print(f"PowerShell failed: {e}")
+                logger.warning("PowerShell notification failed: %s", e)
 
-        # 方式3: 使用 win10toast
+        # 方式3: win10toast
         if not success:
             try:
                 from win10toast import ToastNotifier
+
                 toaster = ToastNotifier()
 
-                # win10toast 的点击回调需要特殊处理
                 def on_clicked():
                     self._on_notification_clicked()
 
@@ -124,30 +127,30 @@ class ReminderManager:
                     icon_path=None,
                     duration=10,
                     threaded=True,
-                    callback_on_click=on_clicked
+                    callback_on_click=on_clicked,
                 )
                 success = True
-                print("win10toast notification sent")
+                logger.info("win10toast notification sent")
             except Exception as e:
-                print(f"win10toast failed: {e}")
+                logger.warning("win10toast failed: %s", e)
 
-        # 方式4: 独立弹窗（总是可用）
+        # 方式4: popup 保底
         if not success:
             self._show_popup_notification(title, message)
 
     def _on_notification_clicked(self):
-        """通知被点击时的回调"""
-        print("Notification clicked!")
+        """通知被点击时触发"""
+        logger.info("Notification clicked")
         if self.on_notification_click:
             try:
                 self.on_notification_click()
             except Exception as e:
-                print(f"Click callback error: {e}")
+                logger.exception("Notification click callback error: %s", e)
 
     def _send_powershell_notification(self, title, message):
-        """使用 PowerShell 发送 Windows Toast 通知"""
+        """使用 PowerShell 发送 Windows Toast"""
         title = title.replace("'", "''").replace('"', '""')
-        message = message.replace("'", "''").replace('"', '""').replace('\n', '`n')
+        message = message.replace("'", "''").replace('"', '""').replace("\n", "`n")
 
         ps_script = f'''
         [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null
@@ -170,43 +173,47 @@ class ReminderManager:
         [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("DailyHydrate").Show($toast)
         '''
 
-        subprocess.run(
+        result = subprocess.run(
             ["powershell", "-Command", ps_script],
             capture_output=True,
-            timeout=10
+            text=True,
+            timeout=10,
+            check=False,
         )
+        if result.returncode != 0:
+            stderr = (result.stderr or "").strip()
+            raise RuntimeError(f"PowerShell toast failed with exit code {result.returncode}: {stderr}")
 
     def _show_popup_notification(self, title, message):
-        """显示独立的弹窗通知"""
+        """显示保底弹窗，优先调度到主线程执行"""
+
         def show_popup():
-            import tkinter as tk
-            from tkinter import messagebox
-
-            root = tk.Tk()
-            root.withdraw()
-            root.attributes("-topmost", True)
-
             try:
-                root.iconbitmap("icon.ico")
-            except:
-                pass
+                from tkinter import messagebox
 
-            result = messagebox.showinfo(title, message)
+                messagebox.showinfo(title, message)
+            except Exception:
+                import ctypes
 
-            # 点击OK后唤醒主窗口
+                ctypes.windll.user32.MessageBoxW(0, message, title, 0x40 | 0x1000)
+
             self._on_notification_clicked()
 
-            root.destroy()
+        if self.ui_dispatch:
+            try:
+                self.ui_dispatch(show_popup)
+                return
+            except Exception as e:
+                logger.warning("ui_dispatch failed: %s", e)
 
-        popup_thread = threading.Thread(target=show_popup, daemon=False)
-        popup_thread.start()
+        show_popup()
 
     def reset_timer(self):
-        """重置提醒计时器"""
+        """重置喝水提醒计时器"""
         self.last_remind_time = time.time()
 
     def get_remaining_seconds(self):
-        """获取距离下次提醒的剩余秒数"""
+        """获取下次喝水提醒剩余秒数"""
         if not self.config.is_remind_enabled():
             return None
 
@@ -216,11 +223,10 @@ class ReminderManager:
 
         elapsed = time.time() - self.last_remind_time
         remaining = interval - elapsed
-
         return max(0, int(remaining))
 
     def get_remaining_time_str(self):
-        """获取距离下次提醒的剩余时间字符串"""
+        """获取下次喝水提醒剩余时间字符串"""
         seconds = self.get_remaining_seconds()
         if seconds is None:
             return "--:--"
@@ -229,25 +235,19 @@ class ReminderManager:
         secs = seconds % 60
         return f"{minutes:02d}:{secs:02d}"
 
-    # 久坐提醒相关方法
     def _sedentary_loop(self):
         """久坐提醒循环"""
         while self.running:
             try:
                 interval = self.config.get_sedentary_interval() * 60
-
                 if self.config.is_sedentary_enabled() and interval > 0:
                     current_time = time.time()
-
-                    if self.last_sedentary_time is None or \
-                       (current_time - self.last_sedentary_time) >= interval:
+                    if self.last_sedentary_time is None or (current_time - self.last_sedentary_time) >= interval:
                         self._send_sedentary_reminder()
                         self.last_sedentary_time = current_time
-
                 time.sleep(1)
-
             except Exception as e:
-                print(f"Sedentary reminder loop error: {e}")
+                logger.exception("Sedentary reminder loop error: %s", e)
                 time.sleep(1)
 
     def _send_sedentary_reminder(self):
@@ -256,7 +256,7 @@ class ReminderManager:
             try:
                 self.on_sedentary_callback()
             except Exception as e:
-                print(f"Sedentary callback error: {e}")
+                logger.exception("Sedentary callback error: %s", e)
 
     def send_sedentary_notification(self):
         """发送久坐提醒通知"""
@@ -273,7 +273,7 @@ class ReminderManager:
         self.last_sedentary_time = time.time()
 
     def get_sedentary_remaining_seconds(self):
-        """获取距离下次久坐提醒的剩余秒数"""
+        """获取下次久坐提醒剩余秒数"""
         if not self.config.is_sedentary_enabled():
             return None
 
@@ -283,11 +283,10 @@ class ReminderManager:
 
         elapsed = time.time() - self.last_sedentary_time
         remaining = interval - elapsed
-
         return max(0, int(remaining))
 
     def get_sedentary_remaining_time_str(self):
-        """获取距离下次久坐提醒的剩余时间字符串"""
+        """获取下次久坐提醒剩余时间字符串"""
         seconds = self.get_sedentary_remaining_seconds()
         if seconds is None:
             return "--:--"
